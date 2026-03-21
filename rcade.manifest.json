@@ -1,7 +1,7 @@
 {
   "$schema": "https://rcade.dev/manifest.schema.json",
-  "name": "webgpu-triangle",
-  "display_name": "WebGPU Triangle",
+  "name": "webgpu-test",
+  "display_name": "WebGPU Test",
   "description": "it's what you think",
   "visibility": "public",
   "authors": [
