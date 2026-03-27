@@ -18,9 +18,8 @@ quitIfWebGPUNotAvailableOrMissingFeatures(adapter, device);
 const context = canvas.getContext('webgpu');
 if (!context) throw new Error('no webgpu context available');
 
-const devicePixelRatio = window.devicePixelRatio;
-canvas.width = canvas.clientWidth * devicePixelRatio;
-canvas.height = canvas.clientHeight * devicePixelRatio;
+canvas.width = canvas.clientWidth;
+canvas.height = canvas.clientHeight;
 const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
 
 context.configure({
@@ -31,19 +30,11 @@ context.configure({
 const pipeline = device.createRenderPipeline({
   layout: 'auto',
   vertex: {
-    module: device.createShaderModule({
-      code: triangleVertWGSL,
-    }),
+    module: device.createShaderModule({ code: triangleVertWGSL }),
   },
   fragment: {
-    module: device.createShaderModule({
-      code: redFragWGSL,
-    }),
-    targets: [
-      {
-        format: presentationFormat,
-      },
-    ],
+    module: device.createShaderModule({ code: redFragWGSL }),
+    targets: [{ format: presentationFormat }],
   },
   primitive: {
     topology: 'triangle-list',
