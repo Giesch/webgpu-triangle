@@ -113,18 +113,39 @@ const pipeline = device.createRenderPipeline({
 
 const triangleParams = new Float32Array(4);
 
-const gameState = {
-  lastTimeMillis: performance.now(),
+interface GameState {
+  lastTimeMillis: number
   // it's the accumulator, name it better
+  frameTimeMillis: number;
+  x: 0.0,
+  y: number;
+  xScale: number;
+  yScale: number;
+
+  audioCtx: AudioContext;
+  bubblesBuffer: AudioBuffer | null;
+  teleportBuffer: AudioBuffer | null;
+  // millis until we can play the effect again
+  bubblesCooldown: number;
+  teleportCooldown: number;
+}
+
+const gameState: GameState = {
+  lastTimeMillis: performance.now(),
   frameTimeMillis: 0.0,
   x: 0.0,
   y: 0.0,
   xScale: 1.0,
   yScale: 1.0,
+
+  audioCtx: new AudioContext(),
+  bubblesBuffer: null,
+  bubblesCooldown: 0.0,
+  teleportBuffer: null,
+  teleportCooldown: 0.0,
 }
 
 const MILLIS_PER_FRAME = 16.6;
-
 const PLAYER_SPEED = 0.1;
 
 /**
@@ -137,6 +158,8 @@ function frame() {
   gameState.frameTimeMillis += deltaTimeMillis;
   while (gameState.frameTimeMillis >= MILLIS_PER_FRAME) {
     gameState.frameTimeMillis -= MILLIS_PER_FRAME;
+    gameState.bubblesCooldown -= MILLIS_PER_FRAME;
+    gameState.teleportCooldown -= MILLIS_PER_FRAME;
 
     if (PLAYER_1.DPAD.up) {
       gameState.y += PLAYER_SPEED;
@@ -149,6 +172,15 @@ function frame() {
     }
     if (PLAYER_1.DPAD.right) {
       gameState.x += PLAYER_SPEED;
+    }
+
+    if (PLAYER_1.A && gameState.bubblesCooldown <= 0.0) {
+      playAudio(gameState.bubblesBuffer!);
+      gameState.bubblesCooldown = 500;
+    }
+    if (PLAYER_1.B && gameState.teleportCooldown <= 0.0) {
+      playAudio(gameState.teleportBuffer!);
+      gameState.teleportCooldown = 500;
     }
   }
 
@@ -186,4 +218,33 @@ function frame() {
   requestAnimationFrame(frame);
 }
 
-requestAnimationFrame(frame);
+function playBubbles() {
+  let bubblesSource = gameState.audioCtx.createBufferSource();
+  bubblesSource.buffer = gameState.bubblesBuffer
+  bubblesSource.connect(gameState.audioCtx.destination);
+  bubblesSource.start()
+}
+
+function playAudio(buffer: AudioBuffer) {
+  let bubblesSource = gameState.audioCtx.createBufferSource();
+  bubblesSource.buffer = buffer;
+  bubblesSource.connect(gameState.audioCtx.destination);
+  bubblesSource.start()
+}
+
+
+async function loadAudio(path: string): Promise<AudioBuffer> {
+  let resp = await fetch(path);
+  let buf = await resp.arrayBuffer();
+  return gameState.audioCtx.decodeAudioData(buf);
+}
+
+async function init() {
+  gameState.bubblesBuffer = await loadAudio('./bubbles_down.wav');
+  gameState.teleportBuffer = await loadAudio('./teleport.wav');
+
+  requestAnimationFrame(frame);
+}
+
+
+init();
