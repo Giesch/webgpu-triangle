@@ -1,12 +1,30 @@
-@vertex
-fn main(
-    @builtin(vertex_index) vertexIndex : u32
-) -> @builtin(position) vec4f {
-    var corners = array<vec2f, 3>(
-        vec2(0.0, 0.5),
-        vec2(-0.5, -0.5),
-        vec2(0.5, -0.5)
-    );
+struct TriangleParams {
+  offset: vec2f,
+  scale: vec2f,
+};
 
-    return vec4f(corners[vertexIndex], 0.0, 1.0);
+@group(0) @binding(0)
+var<uniform> params: TriangleParams;
+
+struct VertexInput {
+  @location(0) position: vec4f,
+};
+
+struct VertexOutput {
+  @builtin(position) position: vec4f,
+};
+
+
+struct FragmentInput {
+  // the interpolated position from above
+  @builtin(position) fragPos: vec4f,
+};
+
+@vertex
+fn main(input: VertexInput) -> VertexOutput {
+  var out: VertexOutput;
+
+  out.position = input.position + vec4f(params.offset.xy, 0.0, 0.0);
+
+  return out;
 }
