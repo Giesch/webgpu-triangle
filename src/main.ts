@@ -7,43 +7,8 @@ import { quitIfWebGPUNotAvailableOrMissingFeatures } from './util';
 import triangleVertWGSL from './triangle.vert.wgsl?raw';
 import redFragWGSL from './red.frag.wgsl?raw';
 
-const canvas = document.querySelector('canvas') as HTMLCanvasElement;
-const adapter = await navigator.gpu?.requestAdapter({
-  featureLevel: 'compatibility',
-});
-
-const device = await adapter?.requestDevice() || null;
-quitIfWebGPUNotAvailableOrMissingFeatures(adapter, device);
-
-const context = canvas.getContext('webgpu');
-if (!context) throw new Error('no webgpu context available');
-
-canvas.width = canvas.clientWidth;
-canvas.height = canvas.clientHeight;
-const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
-
-context.configure({
-  device,
-  format: presentationFormat,
-});
-
 const VERT_STRUCT_SIZE = 16;
 const TRIANGLE_PARAMS_SIZE = 16;
-
-const bindGroupLayout: GPUBindGroupLayout = device.createBindGroupLayout({
-  label: "params layout",
-  entries: [
-    {
-      binding: 0,
-      visibility: GPUShaderStage.VERTEX,
-      buffer: {
-        type: 'uniform',
-        minBindingSize: TRIANGLE_PARAMS_SIZE,
-        hasDynamicOffset: false,
-      }
-    }
-  ]
-});
 
 const VERTS = new Float32Array([
   0.0, 0.5, 0.0, 1.0,
@@ -51,200 +16,299 @@ const VERTS = new Float32Array([
   0.5, -0.5, 0.0, 1.0,
 ]);
 const VERT_COUNT = VERTS.length / 4;
-const vertBuffer: GPUBuffer = device.createBuffer({
-  label: 'vertex buffer',
-  size: VERT_STRUCT_SIZE * VERT_COUNT,
-  usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
-});
-device!.queue.writeBuffer(vertBuffer, 0, VERTS);
-
-const paramsBuffer: GPUBuffer = device.createBuffer({
-  label: 'params buffer',
-  size: TRIANGLE_PARAMS_SIZE,
-  usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-})
-const bindGroup: GPUBindGroup = device.createBindGroup({
-  label: 'params bind group',
-  layout: bindGroupLayout,
-  entries: [
-    {
-      binding: 0,
-      resource: {
-        buffer: paramsBuffer,
-        offset: 0,
-        size: TRIANGLE_PARAMS_SIZE
-      }
-    }
-  ]
-});
-
-const pipelineLayout = device.createPipelineLayout({
-  bindGroupLayouts: [bindGroupLayout]
-});
-const pipeline = device.createRenderPipeline({
-  label: 'triangle pipeline',
-  layout: pipelineLayout,
-  vertex: {
-    module: device.createShaderModule({ code: triangleVertWGSL }),
-    entryPoint: "main",
-    buffers: [
-      {
-        arrayStride: VERT_STRUCT_SIZE,
-        attributes: [
-          {
-            shaderLocation: 0,
-            format: 'float32x4',
-            offset: 0
-          }
-        ]
-      }
-    ],
-  },
-
-  fragment: {
-    module: device.createShaderModule({ code: redFragWGSL }),
-    targets: [{ format: presentationFormat }],
-  },
-
-  primitive: {
-    topology: 'triangle-list',
-  },
-});
-
-const triangleParams = new Float32Array(4);
-
-interface GameState {
-  lastTimeMillis: number
-  // it's the accumulator, name it better
-  frameTimeMillis: number;
-  x: 0.0,
-  y: number;
-  xScale: number;
-  yScale: number;
-
-  audioCtx: AudioContext;
-  bubblesBuffer: AudioBuffer | null;
-  teleportBuffer: AudioBuffer | null;
-  // millis until we can play the effect again
-  bubblesCooldown: number;
-  teleportCooldown: number;
-}
-
-const gameState: GameState = {
-  lastTimeMillis: performance.now(),
-  frameTimeMillis: 0.0,
-  x: 0.0,
-  y: 0.0,
-  xScale: 1.0,
-  yScale: 1.0,
-
-  audioCtx: new AudioContext(),
-  bubblesBuffer: null,
-  bubblesCooldown: 0.0,
-  teleportBuffer: null,
-  teleportCooldown: 0.0,
-}
 
 const MILLIS_PER_FRAME = 16.6;
 const PLAYER_SPEED = 0.1;
 
-/**
- * Draw a frame to the WebGPU context, and recur with requestAnimationFrame
- * requires device and context to be initialized
- */
-function frame() {
-  // UPDATE
-  let deltaTimeMillis = performance.now() - gameState.lastTimeMillis;
-  gameState.frameTimeMillis += deltaTimeMillis;
-  while (gameState.frameTimeMillis >= MILLIS_PER_FRAME) {
-    gameState.frameTimeMillis -= MILLIS_PER_FRAME;
-    gameState.bubblesCooldown -= MILLIS_PER_FRAME;
-    gameState.teleportCooldown -= MILLIS_PER_FRAME;
+const SOUND_EFFECT_COOLDOWN_MS = 500;
 
-    if (PLAYER_1.DPAD.up) {
-      gameState.y += PLAYER_SPEED;
-    }
-    if (PLAYER_1.DPAD.down) {
-      gameState.y -= PLAYER_SPEED;
-    }
-    if (PLAYER_1.DPAD.left) {
-      gameState.x -= PLAYER_SPEED;
-    }
-    if (PLAYER_1.DPAD.right) {
-      gameState.x += PLAYER_SPEED;
-    }
+interface GameStateDeps {
+  lastTimeMillis: number
 
-    if (PLAYER_1.A && gameState.bubblesCooldown <= 0.0) {
-      playAudio(gameState.bubblesBuffer!);
-      gameState.bubblesCooldown = 500;
-    }
-    if (PLAYER_1.B && gameState.teleportCooldown <= 0.0) {
-      playAudio(gameState.teleportBuffer!);
-      gameState.teleportCooldown = 500;
+  audioCtx: AudioContext;
+  bubbles: SoundEffect;
+  teleport: SoundEffect;
+
+  device: GPUDevice;
+  context: GPUCanvasContext;
+  triangleParams: Float32Array<ArrayBuffer>;
+  paramsBuffer: GPUBuffer;
+  pipeline: GPURenderPipeline;
+  vertBuffer: GPUBuffer;
+  bindGroup: GPUBindGroup;
+}
+
+class GameState {
+  // fixed timestep tracking
+  lastTimeMillis: number
+  /** accumulator of millis not yet 'spent' on a fixed timestep */
+  frameTimeMillis: number;
+
+  // triangle
+  x: 0.0;
+  y: number;
+  xScale: number;
+  yScale: number;
+
+  // audio
+  audioCtx: AudioContext;
+  bubbles: SoundEffect;
+  teleport: SoundEffect;
+
+  // rendering
+  device: GPUDevice;
+  context: GPUCanvasContext;
+  triangleParams: Float32Array<ArrayBuffer>;
+  paramsBuffer: GPUBuffer;
+  pipeline: GPURenderPipeline;
+  vertBuffer: GPUBuffer;
+  bindGroup: GPUBindGroup;
+
+  constructor(deps: GameStateDeps) {
+    // time
+    this.lastTimeMillis = deps.lastTimeMillis;
+
+    // audio
+    this.audioCtx = deps.audioCtx;
+    this.bubbles = deps.bubbles;
+    this.teleport = deps.teleport;
+
+    // graphics
+    this.device = deps.device;
+    this.context = deps.context;
+    this.triangleParams = deps.triangleParams;
+    this.paramsBuffer = deps.paramsBuffer;
+    this.pipeline = deps.pipeline;
+    this.vertBuffer = deps.vertBuffer;
+    this.bindGroup = deps.bindGroup;
+
+    // constants
+    this.frameTimeMillis = 0.0;
+    this.x = 0.0;
+    this.y = 0.0;
+    this.xScale = 1.0;
+    this.yScale = 1.0;
+  }
+
+  update(): void {
+    const now = performance.now();
+    const deltaTimeMillis = now - this.lastTimeMillis;
+    this.frameTimeMillis += deltaTimeMillis;
+    this.lastTimeMillis = now;
+
+    while (this.frameTimeMillis >= MILLIS_PER_FRAME) {
+      this.frameTimeMillis -= MILLIS_PER_FRAME;
+      this.bubbles.cooldown -= MILLIS_PER_FRAME;
+      this.teleport.cooldown -= MILLIS_PER_FRAME;
+
+      if (PLAYER_1.DPAD.up) {
+        this.y += PLAYER_SPEED;
+      }
+      if (PLAYER_1.DPAD.down) {
+        this.y -= PLAYER_SPEED;
+      }
+      if (PLAYER_1.DPAD.left) {
+        this.x -= PLAYER_SPEED;
+      }
+      if (PLAYER_1.DPAD.right) {
+        this.x += PLAYER_SPEED;
+      }
+
+      this.tryPlaySoundEffect(PLAYER_1.A, this.bubbles);
+      this.tryPlaySoundEffect(PLAYER_1.B, this.teleport);
     }
   }
 
-  // DRAW
-  const commandEncoder = device!.createCommandEncoder();
+  tryPlaySoundEffect(input: boolean, soundEffect: SoundEffect): void {
+    if (input && soundEffect.cooldown <= 0.0) {
+      this.playAudio(soundEffect.buffer);
+      soundEffect.cooldown = SOUND_EFFECT_COOLDOWN_MS;
+    }
+  }
 
-  const textureView = context!.getCurrentTexture().createView();
+  playAudio(buffer: AudioBuffer): void {
+    let source = this.audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.audioCtx.destination);
+    source.start()
+  }
 
-  triangleParams[0] = gameState.x;
-  triangleParams[1] = gameState.y;
-  triangleParams[2] = gameState.xScale;
-  triangleParams[3] = gameState.yScale;
+  draw(): void {
+    const commandEncoder = this.device.createCommandEncoder();
 
-  device!.queue.writeBuffer(paramsBuffer, 0, triangleParams);
+    const textureView = this.context.getCurrentTexture().createView();
 
-  const passEncoder = commandEncoder.beginRenderPass({
-    colorAttachments: [
-      {
-        view: textureView,
-        clearValue: [0, 0, 0, 0], // Clear to transparent
-        loadOp: 'clear',
-        storeOp: 'store',
-      },
-    ],
-  });
-  passEncoder.setPipeline(pipeline);
-  passEncoder.setVertexBuffer(0, vertBuffer);
-  passEncoder.setBindGroup(0, bindGroup);
-  passEncoder.draw(VERT_COUNT);
-  passEncoder.end();
+    this.triangleParams[0] = this.x;
+    this.triangleParams[1] = this.y;
+    this.triangleParams[2] = this.xScale;
+    this.triangleParams[3] = this.yScale;
 
-  device!.queue.submit([commandEncoder.finish()]);
+    this.device.queue.writeBuffer(this.paramsBuffer, 0, this.triangleParams);
 
-  gameState.lastTimeMillis = performance.now();
-  requestAnimationFrame(frame);
+    const passEncoder = commandEncoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: textureView,
+          clearValue: [0, 0, 0, 0], // Clear to transparent
+          loadOp: 'clear',
+          storeOp: 'store',
+        },
+      ],
+    });
+    passEncoder.setPipeline(this.pipeline);
+    passEncoder.setVertexBuffer(0, this.vertBuffer);
+    passEncoder.setBindGroup(0, this.bindGroup);
+    passEncoder.draw(VERT_COUNT);
+    passEncoder.end();
+
+    this.device.queue.submit([commandEncoder.finish()]);
+  }
 }
 
-function playBubbles() {
-  let bubblesSource = gameState.audioCtx.createBufferSource();
-  bubblesSource.buffer = gameState.bubblesBuffer
-  bubblesSource.connect(gameState.audioCtx.destination);
-  bubblesSource.start()
-}
+class SoundEffect {
+  buffer: AudioBuffer;
+  /** millis until we can play the sound effect again */
+  cooldown: number;
 
-function playAudio(buffer: AudioBuffer) {
-  let bubblesSource = gameState.audioCtx.createBufferSource();
-  bubblesSource.buffer = buffer;
-  bubblesSource.connect(gameState.audioCtx.destination);
-  bubblesSource.start()
+  constructor(buffer: AudioBuffer) {
+    this.buffer = buffer;
+    this.cooldown = 0.0;
+  }
 }
 
 
-async function loadAudio(path: string): Promise<AudioBuffer> {
-  let resp = await fetch(path);
-  let buf = await resp.arrayBuffer();
-  return gameState.audioCtx.decodeAudioData(buf);
+async function loadAudio(audioCtx: AudioContext, path: string): Promise<AudioBuffer> {
+  let response = await fetch(path);
+  let buffer = await response.arrayBuffer();
+  return audioCtx.decodeAudioData(buffer);
 }
 
 async function init() {
-  gameState.bubblesBuffer = await loadAudio('./bubbles_down.wav');
-  gameState.teleportBuffer = await loadAudio('./teleport.wav');
+  const canvas = document.querySelector('canvas') as HTMLCanvasElement;
+  const adapter = await navigator.gpu?.requestAdapter({
+    featureLevel: 'compatibility',
+  });
+
+  const device = await adapter?.requestDevice() || null;
+  quitIfWebGPUNotAvailableOrMissingFeatures(adapter, device);
+
+  const context = canvas.getContext('webgpu');
+  if (!context) throw new Error('no webgpu context available');
+
+  canvas.width = canvas.clientWidth;
+  canvas.height = canvas.clientHeight;
+  const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+
+  context.configure({
+    device,
+    format: presentationFormat,
+  });
+
+  const vertBuffer: GPUBuffer = device.createBuffer({
+    label: 'vertex buffer',
+    size: VERT_STRUCT_SIZE * VERT_COUNT,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+  });
+  device!.queue.writeBuffer(vertBuffer, 0, VERTS);
+
+  const bindGroupLayout: GPUBindGroupLayout = device.createBindGroupLayout({
+    label: "params layout",
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.VERTEX,
+        buffer: {
+          type: 'uniform',
+          minBindingSize: TRIANGLE_PARAMS_SIZE,
+          hasDynamicOffset: false,
+        }
+      }
+    ]
+  });
+
+  const paramsBuffer: GPUBuffer = device.createBuffer({
+    label: 'params buffer',
+    size: TRIANGLE_PARAMS_SIZE,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  })
+  const bindGroup: GPUBindGroup = device.createBindGroup({
+    label: 'params bind group',
+    layout: bindGroupLayout,
+    entries: [
+      {
+        binding: 0,
+        resource: {
+          buffer: paramsBuffer,
+          offset: 0,
+          size: TRIANGLE_PARAMS_SIZE
+        }
+      }
+    ]
+  });
+
+  const pipelineLayout = device.createPipelineLayout({
+    bindGroupLayouts: [bindGroupLayout]
+  });
+  const pipeline = device.createRenderPipeline({
+    label: 'triangle pipeline',
+    layout: pipelineLayout,
+    vertex: {
+      module: device.createShaderModule({ code: triangleVertWGSL }),
+      entryPoint: "main",
+      buffers: [
+        {
+          arrayStride: VERT_STRUCT_SIZE,
+          attributes: [
+            {
+              shaderLocation: 0,
+              format: 'float32x4',
+              offset: 0
+            }
+          ]
+        }
+      ],
+    },
+
+    fragment: {
+      module: device.createShaderModule({ code: redFragWGSL }),
+      targets: [{ format: presentationFormat }],
+    },
+
+    primitive: {
+      topology: 'triangle-list',
+    },
+  });
+
+  const triangleParams = new Float32Array(4);
+  const audioCtx = new AudioContext();
+  const bubblesBuffer = await loadAudio(audioCtx, './bubbles_down.wav');
+  const teleportBuffer = await loadAudio(audioCtx, './teleport.wav');
+
+  const deps: GameStateDeps = {
+    lastTimeMillis: performance.now(),
+
+    audioCtx: audioCtx,
+    bubbles: new SoundEffect(bubblesBuffer),
+    teleport: new SoundEffect(teleportBuffer),
+
+    device,
+    context,
+    triangleParams,
+    paramsBuffer,
+    pipeline,
+    vertBuffer,
+    bindGroup,
+  };
+
+  const game = new GameState(deps);
+
+  const frame = () => {
+    game.update();
+    game.draw();
+    requestAnimationFrame(frame);
+  };
 
   requestAnimationFrame(frame);
 }
-
 
 init();

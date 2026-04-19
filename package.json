@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"vite --port 5173 --strictPort\" \"rcade dev http://localhost:5173\"",
-    "build": "vite build"
+    "build": "vite build",
+    "check": "tsc --watch"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.69",
