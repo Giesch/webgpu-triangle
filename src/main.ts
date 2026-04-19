@@ -38,6 +38,16 @@ interface GameStateDeps {
   bindGroup: GPUBindGroup;
 }
 
+/**
+ * The global state that's passed explicitly into GameState#update
+ */
+interface FrameInput {
+  /** millis since program start, aka `performance.now()` */
+  now: number;
+  /** Player 1's inputs */
+  playerOne: typeof PLAYER_1
+}
+
 class GameState {
   // fixed timestep tracking
   lastTimeMillis: number
@@ -90,32 +100,32 @@ class GameState {
     this.yScale = 1.0;
   }
 
-  update(): void {
-    const now = performance.now();
-    const deltaTimeMillis = now - this.lastTimeMillis;
+  update(input: FrameInput): void {
+    const deltaTimeMillis = input.now - this.lastTimeMillis;
     this.frameTimeMillis += deltaTimeMillis;
-    this.lastTimeMillis = now;
+    this.lastTimeMillis = input.now;
 
+    const playerOne = input.playerOne;
     while (this.frameTimeMillis >= MILLIS_PER_FRAME) {
       this.frameTimeMillis -= MILLIS_PER_FRAME;
       this.bubbles.cooldown -= MILLIS_PER_FRAME;
       this.teleport.cooldown -= MILLIS_PER_FRAME;
 
-      if (PLAYER_1.DPAD.up) {
+      if (playerOne.DPAD.up) {
         this.y += PLAYER_SPEED;
       }
-      if (PLAYER_1.DPAD.down) {
+      if (playerOne.DPAD.down) {
         this.y -= PLAYER_SPEED;
       }
-      if (PLAYER_1.DPAD.left) {
+      if (playerOne.DPAD.left) {
         this.x -= PLAYER_SPEED;
       }
-      if (PLAYER_1.DPAD.right) {
+      if (playerOne.DPAD.right) {
         this.x += PLAYER_SPEED;
       }
 
-      this.tryPlaySoundEffect(PLAYER_1.A, this.bubbles);
-      this.tryPlaySoundEffect(PLAYER_1.B, this.teleport);
+      this.tryPlaySoundEffect(playerOne.A, this.bubbles);
+      this.tryPlaySoundEffect(playerOne.B, this.teleport);
     }
   }
 
@@ -303,8 +313,13 @@ async function init() {
   const game = new GameState(deps);
 
   const frame = () => {
-    game.update();
+    game.update({
+      now: performance.now(),
+      playerOne: PLAYER_1
+    });
+
     game.draw();
+
     requestAnimationFrame(frame);
   };
 
