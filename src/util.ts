@@ -55,7 +55,6 @@ export function quitIfFeaturesNotAvailable(
       fail(
         `This sample requires the '${feature}' feature, which is not supported by this system.`
       );
-      return;
     }
   }
 }
@@ -160,7 +159,6 @@ export function quitIfWebGPUNotAvailableOrMissingFeatures(
   if (!device) {
     quitIfAdapterNotAvailable(adapter);
     fail('Unable to get a device for an unknown reason');
-    return;
   }
 
   device.lost.then((reason) => {
@@ -181,20 +179,40 @@ export function quitIfWebGPUNotAvailableOrMissingFeatures(
   }
 }
 
-/** Fail by showing a console error, and dialog box if possible. */
-const fail = (() => {
-  type ErrorOutput = { show(msg: string): void };
+type DialogMode = 'fatal' | 'recoverable' | null;
 
-  function createErrorOutput() {
-    if (typeof document === 'undefined') {
-      // Not implemented in workers.
-      return {
-        show(msg: string) {
-          console.error(msg);
-        },
-      };
-    }
+interface ErrorOutput {
+  fail(msg: string): void;
+  showRecoverable(msg: string): void;
+  clearRecoverable(): void;
+};
 
+/** dev mode error display not supported from workers */
+class ConsoleErrorOutput implements ErrorOutput {
+  fail(msg: string) {
+    console.error(msg);
+  }
+
+  showRecoverable(msg: string) {
+    console.error(msg);
+  }
+
+  clearRecoverable() {}
+}
+
+/** display webgpu errors and wgsl compilation errors (from hot reload) in a dialog */
+class DialogErrorOutput implements ErrorOutput {
+  private mode: DialogMode;
+  private dialogBox: HTMLDialogElement;
+  private dialogText: HTMLPreElement;
+
+  private constructor(dialogBox: HTMLDialogElement, dialogText: HTMLPreElement) {
+    this.mode = null;
+    this.dialogBox = dialogBox;
+    this.dialogText = dialogText;
+  }
+
+  public static setup(): DialogErrorOutput {
     const dialogBox = document.createElement('dialog');
     dialogBox.close();
     document.body.append(dialogBox);
@@ -208,24 +226,74 @@ const fail = (() => {
     closeBtn.onclick = () => dialogBox.close();
     dialogBox.append(closeBtn);
 
-    return {
-      show(msg: string) {
-        // Don't overwrite the dialog message while it's still open
-        // (show the first error, not the most recent error).
-        if (!dialogBox.open) {
-          dialogText.textContent = msg;
-          dialogBox.showModal();
-        }
-      },
-    };
+    return new DialogErrorOutput(dialogBox, dialogText);
   }
 
-  let output: ErrorOutput | undefined;
+  fail(msg: string) {
+    // a fatal error is never overwritten
+    if (this.mode === 'fatal') return;
 
-  return (message: string) => {
-    if (!output) output = createErrorOutput();
+    this.mode = 'fatal';
+    this.dialogText.textContent = msg;
 
-    output.show(message);
-    throw new Error(message);
-  };
-})();
+    if (!this.dialogBox.open) {
+      this.dialogBox.showModal();
+    }
+  }
+
+  showRecoverable(msg: string) {
+    // avoid overwriting a fatal error with a recoverable one
+    if (this.mode === 'fatal') return;
+
+    this.mode = 'recoverable';
+    this.dialogText.textContent = msg;
+
+    if (!this.dialogBox.open) {
+      this.dialogBox.showModal();
+    }
+  }
+
+  clearRecoverable() {
+    if (this.mode !== 'recoverable') return;
+
+    this.mode = null;
+    this.dialogBox.close();
+  }
+}
+
+function createErrorOutput(): ErrorOutput {
+  if (!document) return new ConsoleErrorOutput();
+
+  return DialogErrorOutput.setup();
+}
+
+let output: ErrorOutput | undefined;
+function getOutput(): ErrorOutput {
+  if (!output) {
+    output = createErrorOutput();
+  }
+
+  return output;
+}
+
+/** Fail by showing a console error, and dialog box if possible. */
+function fail(message: string): never {
+  getOutput().fail(message);
+  throw new Error(message)
+}
+
+/**
+ * Show a non-fatal error in the shared modal (eg, wgsl compilation failure).
+ * Overwrites any prior recoverable * message. Will not overwrite a fatal error.
+ */
+export function showRecoverableError(message: string): void {
+  getOutput().showRecoverable(message);
+}
+
+/**
+ * Dismiss the modal if it's currently showing a recoverable error. Leaves a
+ * fatal error alone.
+ */
+export function clearRecoverableError(): void {
+  getOutput().clearRecoverable();
+}

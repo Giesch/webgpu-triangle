@@ -2,7 +2,11 @@ import './style.css'
 
 import { PLAYER_1 } from '@rcade/plugin-input-classic'
 
-import { quitIfWebGPUNotAvailableOrMissingFeatures } from './util';
+import {
+  clearRecoverableError,
+  quitIfWebGPUNotAvailableOrMissingFeatures,
+  showRecoverableError,
+} from './util';
 
 import triangleVertWGSL from './triangle.vert.wgsl?raw';
 import redFragWGSL from './red.frag.wgsl?raw';
@@ -152,7 +156,6 @@ class GameState {
     this.triangleParams[1] = this.y;
     this.triangleParams[2] = this.xScale;
     this.triangleParams[3] = this.yScale;
-
     this.device.queue.writeBuffer(this.paramsBuffer, 0, this.triangleParams);
 
     const passEncoder = commandEncoder.beginRenderPass({
@@ -186,11 +189,95 @@ class SoundEffect {
   }
 }
 
-
 async function loadAudio(audioCtx: AudioContext, path: string): Promise<AudioBuffer> {
-  let response = await fetch(path);
-  let buffer = await response.arrayBuffer();
+  const response = await fetch(path);
+  const buffer = await response.arrayBuffer();
   return audioCtx.decodeAudioData(buffer);
+}
+
+function formatCompilationMessages(label: string, info: GPUCompilationInfo): string {
+  return info.messages.map((m) => {
+    const loc = `${m.lineNum}:${m.linePos}`;
+    return `[${label}] ${m.type} at ${loc}: ${m.message}`;
+  }).join('\n');
+}
+
+async function createTrianglePipeline(
+  device: GPUDevice,
+  vertCode: string,
+  fragCode: string,
+  layout: GPUPipelineLayout,
+  format: GPUTextureFormat,
+): Promise<GPURenderPipeline | null> {
+  const vertModule = device.createShaderModule({ code: vertCode });
+  const fragModule = device.createShaderModule({ code: fragCode });
+
+  const [vertInfo, fragInfo] = await Promise.all([
+    vertModule.getCompilationInfo(),
+    fragModule.getCompilationInfo(),
+  ]);
+
+  const hasError =
+    vertInfo.messages.some((m) => m.type === 'error') ||
+    fragInfo.messages.some((m) => m.type === 'error');
+
+  if (hasError) {
+    const msg = [
+      formatCompilationMessages('vertex', vertInfo),
+      formatCompilationMessages('fragment', fragInfo),
+    ].filter(Boolean).join('\n');
+    console.error(msg);
+    showRecoverableError(msg);
+    return null;
+  }
+
+  // Surface warnings/info to the console but don't block the rebuild.
+  const warnings = [
+    formatCompilationMessages('vertex', vertInfo),
+    formatCompilationMessages('fragment', fragInfo),
+  ].filter(Boolean).join('\n');
+  if (warnings) console.warn(warnings);
+
+  device.pushErrorScope('validation');
+  const pipeline = device.createRenderPipeline({
+    label: 'triangle pipeline',
+    layout,
+    vertex: {
+      module: vertModule,
+      entryPoint: 'main',
+      buffers: [
+        {
+          arrayStride: VERT_STRUCT_SIZE,
+          attributes: [
+            {
+              shaderLocation: 0,
+              format: 'float32x4',
+              offset: 0,
+            },
+          ],
+        },
+      ],
+    },
+
+    fragment: {
+      module: fragModule,
+      targets: [{ format }],
+    },
+
+    primitive: {
+      topology: 'triangle-list',
+    },
+  });
+
+  const err = await device.popErrorScope();
+  if (err) {
+    console.error(err.message);
+    showRecoverableError(err.message);
+    return null;
+  }
+
+  clearRecoverableError();
+  return pipeline;
 }
 
 async function init() {
@@ -208,7 +295,6 @@ async function init() {
   canvas.width = canvas.clientWidth;
   canvas.height = canvas.clientHeight;
   const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
-
   context.configure({
     device,
     format: presentationFormat,
@@ -259,37 +345,19 @@ async function init() {
   const pipelineLayout = device.createPipelineLayout({
     bindGroupLayouts: [bindGroupLayout]
   });
-  const pipeline = device.createRenderPipeline({
-    label: 'triangle pipeline',
-    layout: pipelineLayout,
-    vertex: {
-      module: device.createShaderModule({ code: triangleVertWGSL }),
-      entryPoint: "main",
-      buffers: [
-        {
-          arrayStride: VERT_STRUCT_SIZE,
-          attributes: [
-            {
-              shaderLocation: 0,
-              format: 'float32x4',
-              offset: 0
-            }
-          ]
-        }
-      ],
-    },
-
-    fragment: {
-      module: device.createShaderModule({ code: redFragWGSL }),
-      targets: [{ format: presentationFormat }],
-    },
-
-    primitive: {
-      topology: 'triangle-list',
-    },
-  });
+  const pipeline = await createTrianglePipeline(
+    device,
+    triangleVertWGSL,
+    redFragWGSL,
+    pipelineLayout,
+    presentationFormat,
+  );
+  if (!pipeline) {
+    throw new Error('initial pipeline build failed');
+  }
 
   const triangleParams = new Float32Array(4);
+
   const audioCtx = new AudioContext();
   const bubblesBuffer = await loadAudio(audioCtx, './bubbles_down.wav');
   const teleportBuffer = await loadAudio(audioCtx, './teleport.wav');
@@ -324,6 +392,35 @@ async function init() {
   };
 
   requestAnimationFrame(frame);
+
+  if (import.meta.hot) {
+    let currentVertCode = triangleVertWGSL;
+    let currentFragCode = redFragWGSL;
+
+    const rebuild = async () => {
+      const nextPipeline = await createTrianglePipeline(
+        device,
+        currentVertCode,
+        currentFragCode,
+        pipelineLayout,
+        presentationFormat,
+      );
+      if (nextPipeline) {
+        game.pipeline = nextPipeline;
+      }
+    };
+
+    import.meta.hot.accept('./triangle.vert.wgsl?raw', (mod) => {
+      if (!mod) return;
+      currentVertCode = mod.default;
+      rebuild();
+    });
+    import.meta.hot.accept('./red.frag.wgsl?raw', (mod) => {
+      if (!mod) return;
+      currentFragCode = mod.default;
+      rebuild();
+    });
+  }
 }
 
 init();
